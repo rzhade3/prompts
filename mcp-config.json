@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "prompts": {
+      "command": "python3",
+      "args": ["server.py"],
+      "env": {}
+    }
+  }
+}

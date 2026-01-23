@@ -1,8 +1,16 @@
+---
+name: style-guide-generation
+description: Generate a style guide from a prose excerpt
+---
+
 You will act as a stylistic evaluator tasked with crafting a concise and reproducible style guide to maintain the stylistic conventions of a provided excerpt of prose. The style guide will be used by an AI model to produce consistent writing in the same style. Follow these guidelines:
 
 1. Context:
-	* Assume the excerpt belongs to `{{ genre }}` and is intended for an audience of `{{ target_audience }}`.
-	* The purpose of the text is to `{{ purpose }}`.
+	* Before analyzing, ask the user to provide (if not already specified):
+		- The genre of the excerpt (e.g., fiction, technical writing, journalism)
+		- The target audience (e.g., general readers, professionals, children)
+		- The purpose of the text (e.g., to inform, entertain, persuade)
+	* If the user doesn't know or wants you to infer, analyze the excerpt and state your assumptions.
 2. Evaluation Criteria:
 	* Analyze tone (e.g., formal, conversational, humorous, etc.), voice (e.g., first-person, third-person, omniscient narrator), and sentence structure (e.g., complex or simple sentences).
 	* Consider word choice, rhythm, paragraph style, and punctuation conventions.

@@ -1,8 +1,8 @@
 # Prompts
 
-This repository contains many of the AI prompts that I use for common tasks. I use them primarily with OpenAI's GPT4o model, but they should work with any GPT model.
+This repository contains AI prompts I use for common tasks. I primarily use them as [Agent Skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills) with [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli), but they should work with any LLM.
 
-Some of these system prompts will require some customization to work with your specific use case. Skills that need additional context (like genre or ticket template) will ask you for this information when invoked.
+Skills that need additional context (like genre or ticket template) will ask you for this information when invoked.
 
 ## Installation as Copilot Agent Skills
 

@@ -1,25 +1,19 @@
-# Prompts
+# Skills
 
-This repository contains AI prompts I use for common tasks. I primarily use them as [Agent Skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills) with [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli), but they should work with any LLM.
+This repository contains [Agent Skills](https://github.com/agentskills/agentskills) I use for common tasks.
 
-Skills that need additional context (like genre or ticket template) will ask you for this information when invoked.
+## Available skills
 
-## Installation as Copilot Agent Skills
+| Skill | Description |
+| ----- | ----------- |
+| [`copyediting`](copyediting/) | Copyedit prose for grammar, correctness, and style while preserving tone and intent. |
+| [`daily-dashboard`](daily-dashboard/) | Triage GitHub notifications and assigned issues into a prioritized daily dashboard. |
+| [`prompt-improvement`](prompt-improvement/) | Review and refine an AI prompt to make it more specific, unambiguous, and effective. |
+| [`prose-evaluation`](prose-evaluation/) | Evaluate prose for flow, transitions, and coherence with constructive feedback. |
+| [`secondhand-goods-research`](secondhand-goods-research/) | Research secondhand goods online and find the best deals, fair prices, and red flags. |
+| [`style-guide-generation`](style-guide-generation/) | Generate a concise, reproducible style guide from an excerpt of prose. |
+| [`writeup-github-issues`](writeup-github-issues/) | Turn task descriptions, feature requests, or bug reports into clear, actionable GitHub issues (optionally opened via `gh`). |
 
-Run the install script to add these prompts as [Agent Skills](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills):
+## Usage
 
-```bash
-python3 install.py
-```
-
-This installs each prompt to `~/.copilot/skills/{skill-name}/SKILL.md`. Copilot automatically loads relevant skills based on their descriptions when performing tasks.
-
-### Available Skills
-
-- **copyediting** - Edit prose for grammar and style
-- **daily-dashboard** - Create a prioritized GitHub dashboard
-- **prompt-improvement** - Improve AI prompts
-- **prose-evaluation** - Evaluate prose for consistency and flow
-- **secondhand-goods-research** - Research secondhand goods deals
-- **style-guide-generation** - Generate a style guide from prose
-- **writeup-github-issues** - Create detailed issue tickets
+Point any skills-compatible agent at this repository (or an individual skill directory). For example, in Copilot CLI, run `/skills add .`

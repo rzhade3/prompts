@@ -6,6 +6,7 @@ This repository contains [Agent Skills](https://github.com/agentskills/agentskil
 
 | Skill | Description |
 | ----- | ----------- |
+| [`chess-com-analysis`](chess-com-analysis/) | Analyze a Chess.com player's recent games and produce actionable coaching, opening analysis, and a study plan. |
 | [`copyediting`](copyediting/) | Copyedit prose for grammar, correctness, and style while preserving tone and intent. |
 | [`daily-dashboard`](daily-dashboard/) | Triage GitHub notifications and assigned issues into a prioritized daily dashboard. |
 | [`prompt-improvement`](prompt-improvement/) | Review and refine an AI prompt to make it more specific, unambiguous, and effective. |

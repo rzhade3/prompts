@@ -2,22 +2,52 @@
 """
 Chess.com game analyzer.
 
-Pulls a player's most recent games from the public Chess.com API (no auth
-required) and produces a structured report: win rates overall and by time
-control, how games are won/lost, opening repertoire by color, and current
-ratings.
+Pulls a player's recent games from the public Chess.com API (no auth required)
+and produces a structured report: win rates overall and by time control, how
+games are won/lost, opening repertoire by color, and current ratings.
+
+Fetched games are cached locally so follow-up questions (narrower windows,
+color/opening/time-control splits, per-game listings) can be answered by
+filtering the cache instead of re-downloading and re-parsing everything.
 
 Usage:
-    python3 analyze.py <username> [--games 500] [--json]
+    python3 analyze.py <username> [options]
+
+Common options:
+    --games N            number of recent games to consider (default 500)
+    --json               emit the aggregate report as JSON
+    --dump-games         emit normalized per-game rows as JSON (for follow-ups)
+    --list-games         print human-readable per-game rows (with opening moves)
+
+Filters (apply to every mode, so e.g. "--days 2" reports just the last 2 days):
+    --days N             only games ended within the last N days
+    --since YYYY-MM-DD   only games ended on/after this UTC date
+    --time-class TC      bullet | blitz | rapid | daily
+    --color COLOR        white | black (the player's color)
+    --opening SUBSTR     opening name contains SUBSTR (case-insensitive)
+
+Caching:
+    --cache-dir DIR      where to store the games cache (see resolution below)
+    --refresh            ignore any fresh cache and re-download
+    --no-cache           do not read or write any cache (always live-fetch)
+
+Cache directory resolution (first that works wins):
+    1. --cache-dir DIR
+    2. $CHESS_CACHE_DIR
+    3. ./.cache/chess-com-analysis   (relative to the current working directory)
+Caching is best-effort: if the directory is not writable, the script simply
+fetches live. Agents should pass --cache-dir pointing at a session-stable,
+writable scratch location so follow-ups in the same session reuse the cache.
 
 Notes:
 - Uses only the Python standard library (urllib, json, re).
 - The Chess.com API requires a descriptive User-Agent header.
-- Data is fetched from monthly archives, newest first, until the requested
-  number of games is collected.
+- Refresh re-downloads the newest month and merges it into the cache,
+  de-duplicating by each game's unique `url`.
 """
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -31,32 +61,130 @@ DRAW_RESULTS = {
     "agreed", "repetition", "stalemate", "insufficient",
     "50move", "timevsinsufficient",
 }
+CACHE_TTL = 600  # seconds; cache newer than this is reused without hitting the network
 
 
+# --------------------------------------------------------------------------- #
+# HTTP
+# --------------------------------------------------------------------------- #
 def _get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.load(resp)
 
 
-def fetch_games(username, want):
-    """Return up to `want` most-recent games (newest first)."""
+# --------------------------------------------------------------------------- #
+# Cache
+# --------------------------------------------------------------------------- #
+def resolve_cache_dir(cli_dir):
+    """Return a writable cache directory, or None if none can be created."""
+    candidates = [
+        cli_dir,
+        os.environ.get("CHESS_CACHE_DIR"),
+        os.path.join(os.getcwd(), ".cache", "chess-com-analysis"),
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        try:
+            os.makedirs(c, exist_ok=True)
+            testfile = os.path.join(c, ".write-test")
+            with open(testfile, "w") as f:
+                f.write("")
+            os.remove(testfile)
+            return c
+        except OSError:
+            continue
+    return None
+
+
+def _cache_path(cache_dir, username):
+    return os.path.join(cache_dir, f"{username}.json")
+
+
+def load_cache(cache_dir, username):
+    """Return (games, fetched_at) from cache, or ([], 0) if unavailable."""
+    if not cache_dir:
+        return [], 0
+    path = _cache_path(cache_dir, username)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("games", []), data.get("fetched_at", 0)
+    except (OSError, ValueError):
+        return [], 0
+
+
+def save_cache(cache_dir, username, games):
+    if not cache_dir:
+        return
+    path = _cache_path(cache_dir, username)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"fetched_at": _now_ts(), "games": games}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass  # best-effort
+
+
+def _now_ts():
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _dedup(games):
+    """Merge games keyed by unique `url`; later entries win (finalized data)."""
+    by_url = {}
+    for g in games:
+        key = g.get("url") or g.get("uuid") or id(g)
+        by_url[key] = g
+    return sorted(by_url.values(), key=lambda g: g.get("end_time", 0), reverse=True)
+
+
+def fetch_games(username, want, cache_dir, refresh, use_cache):
+    """
+    Return up to `want` most-recent games (newest first).
+
+    Strategy: reuse a fresh cache when it already satisfies `want`; otherwise
+    re-download the newest month(s), merge into the cache, and de-dup by `url`.
+    """
     username = username.strip().lower()
+
+    cached = []
+    if use_cache and not refresh:
+        cached, fetched_at = load_cache(cache_dir, username)
+        fresh = (_now_ts() - fetched_at) < CACHE_TTL
+        if fresh and len(cached) >= want:
+            return cached[:want]
+
     try:
         archives = _get(f"{API}/player/{username}/games/archives")["archives"]
     except urllib.error.HTTPError as e:
         if e.code == 404:
             sys.exit(f"Error: Chess.com user '{username}' not found.")
         raise
-    games = []
+
+    merged = {g.get("url"): g for g in cached if g.get("url")}
+    downloaded_any = False
     for url in reversed(archives):  # newest month first
         month = _get(url).get("games", [])
-        games.extend(reversed(month))  # newest game first within month
-        if len(games) >= want:
+        for g in month:
+            if g.get("url"):
+                merged[g["url"]] = g
+        downloaded_any = True
+        # Always refresh at least the newest month; stop once we have enough.
+        if len(merged) >= want and downloaded_any:
             break
+
+    games = _dedup(list(merged.values()))
+    if use_cache:
+        save_cache(cache_dir, username, games)
     return games[:want]
 
 
+# --------------------------------------------------------------------------- #
+# Normalization
+# --------------------------------------------------------------------------- #
 def opening_name(pgn):
     m = re.search(r'\[ECOUrl "https://www\.chess\.com/openings/([^"]+)"\]', pgn or "")
     if m:
@@ -65,9 +193,83 @@ def opening_name(pgn):
     return m.group(1) if m else "Unknown"
 
 
-def analyze(username, games):
-    username = username.strip().lower()
-    n = len(games)
+def extract_moves(pgn, limit=12):
+    """Return the first `limit` SAN moves from a PGN's movetext."""
+    if not pgn:
+        return []
+    parts = pgn.split("\n\n")
+    movetext = parts[-1] if len(parts) > 1 else pgn
+    movetext = re.sub(r"\{[^}]*\}", "", movetext)     # strip clock/eval comments
+    movetext = re.sub(r"\d+\.(\.\.)?", "", movetext)  # strip move numbers
+    movetext = movetext.replace("...", " ")
+    toks = [t for t in movetext.split() if t not in ("1-0", "0-1", "1/2-1/2", "*")]
+    return toks[:limit]
+
+
+def normalize(username, g, moves_limit=12):
+    """Flatten a raw Chess.com game into a single row keyed to the player."""
+    color = "white" if g["white"]["username"].lower() == username else "black"
+    me = g[color]
+    opp = g["black" if color == "white" else "white"]
+    res = me["result"]
+    if res == "win":
+        outcome = "win"
+    elif res in DRAW_RESULTS:
+        outcome = "draw"
+    else:
+        outcome = "loss"
+    et = g.get("end_time")
+    pgn = g.get("pgn", "")
+    return {
+        "url": g.get("url"),
+        "end_time": et,
+        "date": datetime.fromtimestamp(et, timezone.utc).strftime("%Y-%m-%d") if et else None,
+        "time_class": g.get("time_class", "unknown"),
+        "time_control": g.get("time_control"),
+        "my_color": color,
+        "outcome": outcome,          # win | loss | draw
+        "my_result": res,            # raw: win, checkmated, timeout, resigned, ...
+        "opponent_result": opp["result"],
+        "opponent": opp.get("username"),
+        "my_rating": me.get("rating"),
+        "opponent_rating": opp.get("rating"),
+        "opening": opening_name(pgn),
+        "moves": extract_moves(pgn, moves_limit),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Filtering
+# --------------------------------------------------------------------------- #
+def apply_filters(rows, args):
+    out = rows
+    if args.days is not None:
+        cutoff = _now_ts() - args.days * 86400
+        out = [r for r in out if (r["end_time"] or 0) >= cutoff]
+    if args.since:
+        try:
+            since_ts = datetime.strptime(args.since, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            sys.exit("Error: --since must be YYYY-MM-DD")
+        out = [r for r in out if (r["end_time"] or 0) >= since_ts]
+    if args.time_class:
+        tc = args.time_class.lower()
+        out = [r for r in out if r["time_class"] == tc]
+    if args.color:
+        col = args.color.lower()
+        out = [r for r in out if r["my_color"] == col]
+    if args.opening:
+        needle = args.opening.lower()
+        out = [r for r in out if needle in (r["opening"] or "").lower()]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Aggregation / report
+# --------------------------------------------------------------------------- #
+def analyze(username, rows):
+    n = len(rows)
     overall = [0, 0, 0]  # win, loss, draw
     by_tc = defaultdict(lambda: [0, 0, 0])
     win_methods = Counter()
@@ -78,52 +280,41 @@ def analyze(username, games):
                 "black": defaultdict(lambda: [0, 0])}
     first_end = last_end = None
 
-    for g in games:
-        et = g.get("end_time")
-        if et is None:
-            continue
-        first_end = et if first_end is None else min(first_end, et)
-        last_end = et if last_end is None else max(last_end, et)
-        color = "white" if g["white"]["username"].lower() == username else "black"
-        me = g[color]
-        opp = g["black" if color == "white" else "white"]
-        tc = g.get("time_class", "unknown")
-        res = me["result"]
-
-        if et > latest_time.get(tc, -1):
+    for r in rows:
+        et = r["end_time"]
+        if et is not None:
+            first_end = et if first_end is None else min(first_end, et)
+            last_end = et if last_end is None else max(last_end, et)
+        tc = r["time_class"]
+        if et is not None and et > latest_time.get(tc, -1):
             latest_time[tc] = et
-            latest_rating[tc] = me.get("rating")
+            latest_rating[tc] = r["my_rating"]
 
-        name = opening_name(g.get("pgn", ""))
-        short = " ".join(name.split(" ")[:4])
-        od = openings[color][short]
+        short = " ".join((r["opening"] or "Unknown").split(" ")[:4])
+        od = openings[r["my_color"]][short]
         od[1] += 1
 
-        if res == "win":
+        if r["outcome"] == "win":
             overall[0] += 1
             by_tc[tc][0] += 1
-            win_methods[opp["result"]] += 1
+            win_methods[r["opponent_result"]] += 1
             od[0] += 1
-        elif res in DRAW_RESULTS:
+        elif r["outcome"] == "draw":
             overall[2] += 1
             by_tc[tc][2] += 1
         else:
             overall[1] += 1
             by_tc[tc][1] += 1
-            loss_methods[res] += 1
+            loss_methods[r["my_result"]] += 1
 
     def summary(tc):
-        """Win/loss summary for a time control."""
         w, l, d = by_tc[tc]
         total = w + l + d
         if total == 0:
             return None
         score = (w + 0.5 * d) / total
-        return {
-            "games": total,
-            "win_rate": round(score * 100, 1),
-            "current_rating": latest_rating.get(tc),
-        }
+        return {"games": total, "win_rate": round(score * 100, 1),
+                "current_rating": latest_rating.get(tc)}
 
     return {
         "username": username,
@@ -189,21 +380,70 @@ def print_report(r):
     print("(* = played often but low win rate — candidate to fix/replace)\n")
 
 
+def print_game_list(rows):
+    print(f"\n{len(rows)} games (newest first):\n")
+    for r in rows:
+        rating = r["my_rating"] if r["my_rating"] is not None else "-"
+        header = (f"{r['date']}  {r['time_class']:6s}  {r['my_color']:5s}  "
+                  f"{r['outcome']:4s} ({r['my_result']})  vs {r['opponent']} "
+                  f"[{rating} v {r['opponent_rating']}]")
+        print(header)
+        print(f"    {r['opening']}")
+        if r["moves"]:
+            print(f"    {' '.join(r['moves'])}")
+        print()
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description="Analyze a Chess.com player's recent games.")
     ap.add_argument("username")
     ap.add_argument("--games", type=int, default=500, help="number of recent games (default 500)")
-    ap.add_argument("--json", action="store_true", help="emit raw JSON instead of a report")
+
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--json", action="store_true", help="emit the aggregate report as JSON")
+    mode.add_argument("--dump-games", dest="dump_games", action="store_true",
+                      help="emit normalized per-game rows as JSON")
+    mode.add_argument("--list-games", dest="list_games", action="store_true",
+                      help="print per-game rows with opening moves")
+
+    ap.add_argument("--days", type=int, help="only games ended within the last N days")
+    ap.add_argument("--since", help="only games ended on/after this UTC date (YYYY-MM-DD)")
+    ap.add_argument("--time-class", dest="time_class", help="bullet | blitz | rapid | daily")
+    ap.add_argument("--color", help="white | black (the player's color)")
+    ap.add_argument("--opening", help="opening name contains this substring (case-insensitive)")
+    ap.add_argument("--moves", type=int, default=12, help="opening moves to keep per game (default 12)")
+
+    ap.add_argument("--cache-dir", dest="cache_dir", help="directory for the games cache")
+    ap.add_argument("--refresh", action="store_true", help="ignore fresh cache and re-download")
+    ap.add_argument("--no-cache", dest="no_cache", action="store_true", help="never read or write a cache")
     args = ap.parse_args()
 
-    games = fetch_games(args.username, args.games)
+    use_cache = not args.no_cache
+    cache_dir = resolve_cache_dir(args.cache_dir) if use_cache else None
+
+    games = fetch_games(args.username, args.games, cache_dir, args.refresh, use_cache)
     if not games:
         sys.exit("No games found for that user.")
-    report = analyze(args.username, games)
-    if args.json:
-        print(json.dumps(report, indent=2))
+
+    username = args.username.strip().lower()
+    rows = [normalize(username, g, args.moves) for g in games]
+    rows = apply_filters(rows, args)
+    if not rows:
+        sys.exit("No games match the given filters.")
+
+    if args.dump_games:
+        print(json.dumps(rows, indent=2))
+    elif args.list_games:
+        print_game_list(rows)
     else:
-        print_report(report)
+        report = analyze(username, rows)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print_report(report)
 
 
 if __name__ == "__main__":

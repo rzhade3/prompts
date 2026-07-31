@@ -16,14 +16,45 @@ If the user has not given a Chess.com username, ask for it (a single freeform qu
 Run the bundled script from the skill directory. It uses only the Python standard library, so no install step is required:
 
 ```bash
-python3 scripts/analyze.py <username> --games 500
+python3 scripts/analyze.py <username> --games 500 --cache-dir <session-workspace>/chess-cache
 ```
 
-Options:
-- `--games N` — how many recent games to pull (default 500). Fewer = faster.
-- `--json` — emit raw structured JSON instead of the text report (use this if you want to compute additional cuts yourself).
+**Always pass `--cache-dir`** pointing at a session-stable, writable scratch
+location (the session workspace is ideal). The first run fetches from the API
+and caches every game locally; every follow-up question then reads that cache
+in ~0.1s instead of re-downloading. This is the key to answering clarifying
+questions cheaply — do NOT hand-write throwaway fetch scripts.
 
-The script fetches monthly archives newest-first until it has N games, then prints: overall record, per-time-control table (games, win%, and current rating), how they win, how they lose, and their top openings as White and Black (lines flagged with `*` are played often but score poorly — replacement candidates).
+Modes (mutually exclusive; default is the aggregate report):
+- `--json` — the aggregate report as structured JSON.
+- `--dump-games` — normalized per-game rows as JSON (one object per game with
+  `end_time`, `date`, `time_class`, `my_color`, `outcome`, `my_result`,
+  `opponent`, `my_rating`, `opening`, `moves`, …). Pipe to `jq` for any cut.
+- `--list-games` — human-readable per-game rows including the opening name and
+  first ~12 moves (great for "show me the games I lost in X").
+
+Filters (apply to **every** mode, and compose — so the report/list/dump only
+covers the matching games):
+- `--days N` / `--since YYYY-MM-DD` — time window (e.g. `--days 2`).
+- `--time-class bullet|blitz|rapid|daily`.
+- `--color white|black` — the player's color.
+- `--opening "Italian"` — opening name substring (case-insensitive).
+
+Other options:
+- `--games N` — how many recent games to consider (default 500). Fewer = faster.
+- `--moves N` — opening moves to keep per game in list/dump (default 12).
+- `--refresh` — ignore a fresh cache and re-download (merges + de-dups by game `url`).
+- `--no-cache` — never read or write a cache (always live-fetch).
+
+The default report prints: overall record, per-time-control table (games, win%,
+current rating), how they win, how they lose, and top openings by color (`*` =
+played often but scoring poorly — replacement candidates).
+
+**Answer follow-ups by re-running with filters, not by writing new scripts.**
+Examples:
+- "How were the last 2 days?" → `--days 2`
+- "Was that in blitz or bullet?" → add `--time-class` or use `--list-games`
+- "Show my losing Black games in the Italian" → `--color black --opening Italian --list-games`
 
 If the script fails (e.g., 404), the username is wrong — re-ask. If the API is unreachable, you can fetch archives directly (`https://api.chess.com/pub/player/<user>/games/archives`) and reproduce the analysis, but prefer the script.
 
@@ -51,8 +82,17 @@ Tailor every point to THIS player's numbers — cite their actual win rates, cou
 
 ## Optional deeper cuts
 
-The user may ask for narrower windows (e.g., "last 2 days") or splits (win/loss method by time control, opening results filtered by color, whether they play an opening vs. face it). Use `--json` output or write a short ad-hoc Python script over the fetched archives to answer these. Key PGN/JSON fields:
-- `end_time` (unix), `time_class`, `white`/`black` each with `username`, `rating`, `result`.
-- Result strings: `win`; losses include `checkmated`, `timeout`, `resigned`, `abandoned`; draws include `agreed`, `repetition`, `stalemate`, `insufficient`, `50move`, `timevsinsufficient`.
-- Opening name is in the PGN tag `[ECOUrl ".../openings/<Name>"]`.
-- When the player is White the opponent's `result` tells you *how you won*; when Black, vice-versa.
+The user may ask for narrower windows (e.g., "last 2 days") or splits (win/loss
+method by time control, opening results filtered by color, whether they play an
+opening vs. face it). **Prefer the built-in filters** (`--days`/`--since`,
+`--time-class`, `--color`, `--opening`) combined with `--list-games` or
+`--dump-games` — these read the local cache and need no custom code.
+
+Only when a cut isn't expressible with the flags (e.g. facing an opening vs.
+playing it, or grouping by opponent rating) should you fall back to `jq` over
+`--dump-games` output, or a short ad-hoc script over the cached games. Key
+fields on each `--dump-games` row: `end_time`, `date`, `time_class`, `my_color`,
+`outcome` (win/loss/draw), `my_result` (raw: `checkmated`/`timeout`/`resigned`/…),
+`opponent_result`, `opponent`, `my_rating`, `opponent_rating`, `opening`, `moves`.
+- Losses include `checkmated`, `timeout`, `resigned`, `abandoned`; draws include `agreed`, `repetition`, `stalemate`, `insufficient`, `50move`, `timevsinsufficient`.
+- `outcome` already normalizes win/loss/draw; `opponent_result` tells you *how you won*.
